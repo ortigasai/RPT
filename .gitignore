@@ -1,0 +1,29 @@
+# ---- local secrets — never commit / share ----
+broker_config.json
+
+# ---- python env ----
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+requirements.lock.txt
+
+# ---- runtime / generated ----
+logs/
+*.xlsx
+*.log
+
+# ---- server-only, produced by deploy/migration ----
+vendor/            # bundled Tesseract etc.
+models/            # bundled PaddleOCR weights
+iis/               # generated IIS site folder (web.config lives in deploy/)
+tools/nssm.exe
+deploy/*.zip
+deploy/_work/
+
+# ---- editor / OS ----
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

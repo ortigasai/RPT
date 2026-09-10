@@ -1,0 +1,6 @@
+{
+  "endpoint": "https://paba.ortigasland.com.ph/api/v1",
+  "api_key": "PASTE_THE_PERM_REG_API_KEY_HERE",
+  "scope": "perm-reg-api",
+  "_note": "Copy this file to broker_config.json (which is git-ignored) and fill in the real key. The app also accepts RPT_BROKER_URL / RPT_BROKER_KEY / RPT_BROKER_SCOPE environment variables instead."
+}

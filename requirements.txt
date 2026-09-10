@@ -1,0 +1,17 @@
+Flask==3.1.3
+pdfplumber==0.11.10
+pymupdf==1.28.2
+pillow==12.3.0
+numpy==2.5.2
+openpyxl==3.1.5
+requests==2.34.2
+
+# OCR — deep-learning engine, runs offline (model weights download once, ~15 MB).
+paddlepaddle==3.0.0
+paddleocr>=2.9,<3
+setuptools>=70        # paddlepaddle imports it at runtime
+
+# OCR — classic fallback engine (needs the Tesseract binary installed separately).
+pytesseract==0.3.13
+# opencv comes in via paddleocr (opencv-contrib-python); headless is fine too.
+

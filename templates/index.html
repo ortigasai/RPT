@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RPT Assessment Extractor</title>
+<style>
+  :root { --bg:#f4f6f9; --card:#fff; --ink:#1c2733; --muted:#5b6b7b;
+          --brand:#1f4e78; --brand2:#2a6db5; --line:#dde3ea; --warn:#9c2500;
+          --ok:#1b7a3d; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.5 "Segoe UI",Roboto,Arial,sans-serif;
+         background:var(--bg); color:var(--ink); }
+  header { background:var(--brand); color:#fff; padding:18px 24px; }
+  header h1 { margin:0; font-size:19px; font-weight:600; }
+  header p { margin:4px 0 0; font-size:13px; opacity:.85; }
+  main { max-width:1150px; margin:22px auto; padding:0 18px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:20px 22px; margin-bottom:20px; }
+  label { display:block; font-weight:600; margin-bottom:6px; }
+  select, textarea, input[type=file] { width:100%; padding:9px 11px;
+          border:1px solid var(--line); border-radius:7px; font:inherit;
+          background:#fff; }
+  textarea { resize:vertical; min-height:64px; }
+  .row { display:flex; gap:18px; flex-wrap:wrap; }
+  .row > div { flex:1 1 260px; }
+  .hint { color:var(--muted); font-size:12.5px; margin-top:5px; }
+  .or { text-align:center; color:var(--muted); font-size:13px; margin:14px 0 4px; }
+  button { background:var(--brand2); color:#fff; border:0; border-radius:8px;
+           padding:11px 22px; font:inherit; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.55; cursor:progress; }
+  .warnbar { background:#fff5ef; border:1px solid #f0d3c2; color:var(--warn);
+             border-radius:8px; padding:10px 12px; font-size:13px; margin-top:14px; }
+  .status { margin-top:14px; font-size:14px; }
+  .err { color:var(--warn); font-weight:600; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  .tablewrap { overflow:auto; max-height:60vh; border:1px solid var(--line);
+               border-radius:8px; }
+  th, td { border:1px solid var(--line); padding:6px 9px; text-align:left;
+           white-space:nowrap; }
+  th { background:var(--brand); color:#fff; position:sticky; top:0; }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  tr:nth-child(even) td { background:#f8fafc; }
+  tr.flag td { background:#fff2cc; }
+  td.review { color:#9c2500; white-space:normal; min-width:220px; }
+  .toolbar { display:flex; justify-content:space-between; align-items:center;
+             gap:12px; margin-bottom:10px; flex-wrap:wrap; }
+  .dl { background:var(--ok); text-decoration:none; display:inline-block; }
+  .notes { font-size:12.5px; color:var(--muted); margin-top:10px; }
+  .notes li { margin:2px 0; }
+  .spin { display:inline-block; width:14px; height:14px; border:2px solid #ccd;
+          border-top-color:var(--brand2); border-radius:50%;
+          animation:sp .8s linear infinite; vertical-align:-2px; }
+  @keyframes sp { to { transform:rotate(360deg); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>RPT Assessment Extractor</h1>
+  <p>Pick a location, point it at the tax-bill PDFs, get an Excel file plus an on-page summary.</p>
+</header>
+<main>
+  {% if not health.ocr_ready %}
+  <div class="warnbar">No OCR engine is available, so scanned PDFs can't be read.
+    Install PaddleOCR (<code>pip install -r requirements.txt</code>) or Tesseract, then restart.</div>
+  {% else %}
+  <div class="hint" style="margin-bottom:14px">OCR engine: <b>{{ health.backend }}</b>{% if health.backend == 'paddle' %} (deep-learning, runs offline){% endif %}.</div>
+  {% endif %}
+
+  <form id="f" class="card">
+    <div class="row">
+      <div>
+        <label for="location">Location</label>
+        <select id="location" name="location" required>
+          {% for loc in locations %}<option value="{{ loc }}">{{ loc }}</option>{% endfor %}
+        </select>
+        <div class="hint">Mandaluyong City &amp; Pampanga have no column layout yet — they return raw OCR lines.</div>
+      </div>
+      <div>
+        <label for="link">Link / path to the PDF(s)</label>
+        <textarea id="link" name="link" placeholder="/RPT Assessment/2026/Ortigas Properties/Pasig"></textarea>
+        <div class="hint">Paste a <b>Permits &amp; Reg path</b> (starts with <code>/</code>) &mdash; every PDF in that folder and its subfolders is pulled in. A single <code>.pdf</code> path works too. Plain <b>&ldquo;Anyone with the link&rdquo;</b> SharePoint file links also work; sign-in-only and folder share links don&rsquo;t &mdash; use upload for those.</div>
+      </div>
+    </div>
+    <div class="or">&mdash; or &mdash;</div>
+    <label for="files">Upload PDF file(s)</label>
+    <input type="file" id="files" name="files" accept="application/pdf" multiple>
+    <div class="hint">Most reliable option. You can select several PDFs at once.</div>
+    <div id="samples" class="hint" style="margin-top:8px"></div>
+    <div style="margin-top:16px">
+      <button id="go" type="submit">Extract data</button>
+    </div>
+    <div id="status" class="status"></div>
+  </form>
+
+  <div id="out" class="card" style="display:none">
+    <div class="toolbar">
+      <div><b id="outLoc"></b> &nbsp;<span id="outMeta" class="hint"></span></div>
+      <a id="dl" class="dl" href="#">Download Excel</a>
+    </div>
+    <div class="tablewrap"><table id="tbl"></table></div>
+    <ul id="notes" class="notes"></ul>
+  </div>
+</main>
+<script>
+const f = document.getElementById('f');
+const statusEl = document.getElementById('status');
+const out = document.getElementById('out');
+const numRe = /^-?\(?[\d,]+(\.\d+)?\)?$/;
+
+// Optional: one-click load of a PDF that sits next to the app, for quick testing.
+fetch('/samples').then(r => r.json()).then(list => {
+  if (!list || !list.length) return;
+  const box = document.getElementById('samples');
+  box.append('Or try a bundled sample: ');
+  list.forEach((name, i) => {
+    const a = document.createElement('a');
+    a.href = '#'; a.textContent = name.replace(/\.pdf$/i, '');
+    a.onclick = async (e) => {
+      e.preventDefault();
+      const blob = await (await fetch('/samples/' + encodeURIComponent(name))).blob();
+      const dt = new DataTransfer();
+      dt.items.add(new File([blob], name, { type: 'application/pdf' }));
+      document.getElementById('files').files = dt.files;
+      box.querySelectorAll('a').forEach(x => x.style.fontWeight = '');
+      a.style.fontWeight = '700';
+    };
+    box.append(a);
+    if (i < list.length - 1) box.append(' · ');
+  });
+});
+
+f.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById('go');
+  btn.disabled = true;
+  statusEl.innerHTML = '<span class="spin"></span> Reading PDFs and running OCR&hellip; roughly 2–5 seconds per page, so a 30-page file takes a couple of minutes. The very first run also downloads the OCR model (~15 MB).';
+  out.style.display = 'none';
+  try {
+    const res = await fetch('/extract', { method:'POST', body:new FormData(f) });
+    const data = await res.json();
+    if (!res.ok) { statusEl.innerHTML = '<span class="err">' + (data.error||'Something went wrong.') + '</span>'; return; }
+    render(data);
+    statusEl.textContent = '';
+  } catch (err) {
+    statusEl.innerHTML = '<span class="err">Request failed: ' + err + '</span>';
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+function render(d) {
+  document.getElementById('outLoc').textContent = d.location;
+  document.getElementById('outMeta').textContent =
+    `${d.row_count} row(s) · ${d.rows_flagged || 0} need review · ${d.seconds}s · ${d.files.join(', ')}` +
+    (d.row_count > d.rows.length ? ` · showing first ${d.rows.length}` : '');
+  const dl = document.getElementById('dl');
+  dl.setAttribute('href', d.download);
+
+  const tbl = document.getElementById('tbl');
+  tbl.innerHTML = '';
+  const thead = tbl.createTHead().insertRow();
+  d.columns.forEach(c => { const th = document.createElement('th'); th.textContent = c; thead.appendChild(th); });
+  const tb = tbl.createTBody();
+  d.rows.forEach(r => {
+    const tr = tb.insertRow();
+    if (String(r['Review'] || '').trim()) tr.className = 'flag';
+    d.columns.forEach(c => {
+      const td = tr.insertCell();
+      let v = r[c]; if (v === null || v === undefined) v = '';
+      td.textContent = v;
+      if (c === 'Review') td.className = 'review';
+      else if (typeof v === 'number' || (typeof v === 'string' && v && numRe.test(v.trim()))) td.className = 'num';
+    });
+  });
+
+  const ul = document.getElementById('notes');
+  ul.innerHTML = '';
+  (d.notes || []).forEach(n => { const li = document.createElement('li'); li.textContent = n; ul.appendChild(li); });
+  out.style.display = 'block';
+}
+</script>
+</body>
+</html>

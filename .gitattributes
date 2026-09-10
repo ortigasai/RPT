@@ -1,0 +1,9 @@
+# Keep Windows scripts CRLF, everything else LF-normalised.
+* text=auto eol=lf
+*.ps1  text eol=crlf
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+web.config text eol=crlf
+*.pdf  binary
+*.xlsx binary
+tools/nssm.exe binary
