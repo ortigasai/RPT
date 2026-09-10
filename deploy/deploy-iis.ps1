@@ -306,9 +306,15 @@ try {
         -filter 'system.webServer/proxy' -name 'enabled' -value 'True'
     Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' `
         -filter 'system.webServer/proxy' -name 'preserveHostHeader' -value 'True'
-    Write-Ok "ARR proxying enabled at the server level"
+    # OCR of a big scanned SOA can take minutes; ARR's default 120s proxy
+    # timeout would return a 502 HTML page mid-extraction. Give it 15 min.
+    Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' `
+        -filter 'system.webServer/proxy' -name 'timeout' -value '00:15:00'
+    Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' `
+        -filter 'system.webServer/proxy' -name 'responseBufferLimit' -value 0
+    Write-Ok "ARR proxying enabled (15-min timeout, unbuffered)"
 } catch {
-    Write-Warn2 "Could not enable ARR proxying automatically ($($_.Exception.Message))  -  in IIS Manager, server node > Application Request Routing Cache > Server Proxy Settings > tick 'Enable proxy'."
+    Write-Warn2 "Could not configure ARR automatically ($($_.Exception.Message))  -  in IIS Manager, server node > Application Request Routing Cache > Server Proxy Settings: tick 'Enable proxy', set 'Time-out (seconds)' to 900."
 }
 
 Write-Step "Publishing site '$SiteName' on http://*:$FrontendPort"
@@ -320,6 +326,10 @@ Set-ItemProperty "IIS:\AppPools\$AppPoolName" startMode 'AlwaysRunning'
 Set-ItemProperty "IIS:\AppPools\$AppPoolName" processModel.idleTimeout '00:00:00'
 New-Website -Name $SiteName -PhysicalPath $IisRoot -ApplicationPool $AppPoolName `
     -Port $FrontendPort -IPAddress '*' -Force | Out-Null
+# match the ARR timeout so a long OCR request isn't killed by the idle limit
+Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' `
+    -filter "system.applicationHost/sites/site[@name='$SiteName']/limits" `
+    -name 'connectionTimeout' -value '00:15:00' -ErrorAction SilentlyContinue
 Start-Website -Name $SiteName
 icacls $IisRoot /grant "IIS_IUSRS:(OI)(CI)RX" /grant "IUSR:(OI)(CI)RX" | Out-Null
 Write-Ok "IIS site '$SiteName' is up"

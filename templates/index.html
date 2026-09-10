@@ -138,6 +138,15 @@ f.addEventListener('submit', async (e) => {
   out.style.display = 'none';
   try {
     const res = await fetch('/extract', { method:'POST', body:new FormData(f) });
+    const ct = res.headers.get('content-type') || '';
+    if (!ct.includes('application/json')) {
+      const txt = (await res.text()).slice(0, 200);
+      let msg = `The server returned ${res.status} instead of a result.`;
+      if (res.status === 502 || res.status === 504 || /gateway/i.test(txt))
+        msg += ' It likely timed out on a large OCR job — try a smaller folder / a single PDF, or ask IT to raise the IIS reverse-proxy timeout.';
+      statusEl.innerHTML = '<span class="err">' + msg + '</span>';
+      return;
+    }
     const data = await res.json();
     if (!res.ok) { statusEl.innerHTML = '<span class="err">' + (data.error||'Something went wrong.') + '</span>'; return; }
     render(data);
