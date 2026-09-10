@@ -285,12 +285,16 @@ Start-Website -Name $SiteName
 icacls $IisRoot /grant "IIS_IUSRS:(OI)(CI)RX" /grant "IUSR:(OI)(CI)RX" | Out-Null
 Write-Ok "IIS site '$SiteName' is up"
 
-# --- Firewall -------------------------------------------------------
-if (-not (Get-NetFirewallRule -DisplayName "RPT HTTP $FrontendPort" -ErrorAction SilentlyContinue)) {
-    New-NetFirewallRule -DisplayName "RPT HTTP $FrontendPort" -Direction Inbound `
-        -Action Allow -Protocol TCP -LocalPort $FrontendPort | Out-Null
-    Write-Ok "Firewall opened for TCP $FrontendPort"
-}
+# --- Firewall: allow TCP $FrontendPort on the LAN (Domain + Private) --------
+# Inbound = other machines can reach the site.  Outbound = also allowed
+# explicitly, for servers whose outbound policy is set to Block.
+Write-Step "Firewall rules for TCP $FrontendPort (Domain, Private)"
+Get-NetFirewallRule -DisplayName "RPT HTTP $FrontendPort*" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+New-NetFirewallRule -DisplayName "RPT HTTP $FrontendPort (in)"  -Direction Inbound  `
+    -Action Allow -Protocol TCP -LocalPort $FrontendPort -Profile Domain,Private -Enabled True | Out-Null
+New-NetFirewallRule -DisplayName "RPT HTTP $FrontendPort (out)" -Direction Outbound `
+    -Action Allow -Protocol TCP -LocalPort $FrontendPort -Profile Domain,Private -Enabled True | Out-Null
+Write-Ok "Inbound + outbound allow rules set for TCP $FrontendPort"
 
 # --- Health check --------------------------------------------------
 Write-Step "Health check (PaddleOCR warm-up can take ~60 s on first start)"
