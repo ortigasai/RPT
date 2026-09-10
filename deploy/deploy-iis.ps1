@@ -62,28 +62,46 @@ $IisRoot = Join-Path $RepoRoot 'iis'
 $Tools   = Join-Path $RepoRoot 'tools'
 New-Item -ItemType Directory -Force -Path $Logs,$Home_,$Tools,$IisRoot | Out-Null
 
+# paddlepaddle / numpy only ship wheels up to CPython 3.12, so the venv MUST be
+# built with 3.10-3.12 even if a newer Python is on PATH.
+function Test-PySupported($exe) {
+    if (-not $exe -or -not (Test-Path $exe)) { return $false }
+    try {
+        $v = & $exe -c "import sys;print('%d.%d'%sys.version_info[:2])" 2>$null
+        return ($v -match '^3\.(1[0-2]|[89])$')
+    } catch { return $false }
+}
 function Find-Python {
-    if ($PythonExe -and (Test-Path $PythonExe)) { return $PythonExe }
-    foreach ($c in @(
+    if ($PythonExe) {
+        if (Test-PySupported $PythonExe) { return $PythonExe }
+        throw "-PythonExe '$PythonExe' is not a supported version (need 3.10-3.12)."
+    }
+    $cands = @(
         "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
         "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
-        "C:\Python312\python.exe","C:\Python311\python.exe")) {
-        if (Test-Path $c) { return $c }
-    }
-    $p = (Get-Command python.exe -ErrorAction SilentlyContinue |
-          Where-Object { $_.Source -notmatch 'WindowsApps' } | Select-Object -First 1).Source
-    return $p
+        "$env:LOCALAPPDATA\Programs\Python\Python310\python.exe",
+        "C:\Python312\python.exe","C:\Python311\python.exe","C:\Python310\python.exe",
+        "$env:ProgramFiles\Python312\python.exe","$env:ProgramFiles\Python311\python.exe")
+    $cands += (Get-Command python.exe,python3.12.exe,python3.11.exe -ErrorAction SilentlyContinue |
+               Where-Object { $_.Source -notmatch 'WindowsApps' } | Select-Object -ExpandProperty Source)
+    try { $cands += (& py -3.12 -c "import sys;print(sys.executable)" 2>$null) } catch {}
+    foreach ($c in $cands) { if (Test-PySupported $c) { return $c } }
+    return $null
 }
 
 $py = Find-Python
 if (-not $py) {
-    Write-Warn2 "Python not found  -  installing 3.12 via winget"
+    Write-Warn2 "No Python 3.10-3.12 found (paddlepaddle needs it)  -  installing 3.12 via winget"
     winget install --id Python.Python.3.12 -e --scope machine `
         --accept-package-agreements --accept-source-agreements --disable-interactivity
+    $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
     $py = Find-Python
 }
-if (-not $py) { throw "Python still not found. Install Python 3.12 and re-run (or pass -PythonExe)." }
-Write-Ok "Python: $py"
+if (-not $py) {
+    throw "Need Python 3.10-3.12 (this server appears to have a newer one that paddlepaddle has no wheels for). Install Python 3.12 from python.org, then re-run  -  or re-run with -PythonExe C:\path\to\python312\python.exe"
+}
+$pyver = & $py -c "import sys;print('%d.%d.%d'%sys.version_info[:3])"
+Write-Ok "Python: $py  (v$pyver)"
 
 $rewriteDll = Join-Path $env:SystemRoot 'System32\inetsrv\rewrite.dll'
 if (-not (Test-Path $rewriteDll)) { Write-Warn2 "IIS URL Rewrite not detected  -  the script will install it below." }
@@ -120,11 +138,21 @@ if ($svc -and $svc.Status -ne 'Stopped') {
 
 # --- Build the venv --------------------------------------------------
 Write-Step "Building the Python environment"
+if ((Test-Path $VenvPy) -and -not (Test-PySupported $VenvPy)) {
+    Write-Warn2 "Existing .venv was built with an unsupported Python  -  recreating"
+    Remove-Item $Venv -Recurse -Force
+}
 if (-not (Test-Path $VenvPy)) { & $py -m venv $Venv }
 & $VenvPy -m pip install --upgrade pip --quiet
-& $VenvPy -m pip install --quiet -r (Join-Path $RepoRoot 'requirements.txt')
+& $VenvPy -m pip install -r (Join-Path $RepoRoot 'requirements.txt')
+if ($LASTEXITCODE -ne 0) {
+    throw "pip install failed  -  see the errors above. Most likely the venv Python is unsupported (paddlepaddle needs 3.10-3.12) or the server has no internet access to PyPI."
+}
 & $VenvPy -m pip install --quiet setuptools
-Write-Ok "venv ready"
+# sanity: the imports the app actually needs
+& $VenvPy -c "import flask, sqlalchemy, dotenv, cv2, paddleocr, fitz" 2>$null
+if ($LASTEXITCODE -ne 0) { throw "venv is missing core packages after pip install  -  check the pip output above." }
+Write-Ok "venv ready ($pyver)"
 
 # --- Database schema  (cwt's `prisma migrate deploy` analogue) ----------
 Write-Step "Applying the database schema (RPT)"
