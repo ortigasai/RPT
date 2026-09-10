@@ -201,10 +201,14 @@ try {
 } finally { Pop-Location; $ErrorActionPreference = 'Stop' }
 
 # --- NSSM service ---------------------------------------------------
+# nssm writes "Set parameter..." to stdout but "SERVICE_START_PENDING" etc. to
+# stderr, which PS 5.1 + EAP=Stop treats as fatal - so this whole section runs
+# with EAP=Continue and checks status explicitly.
+$ErrorActionPreference = 'Continue'
 Write-Step "Installing/updating the backend service ('$ServiceName')  ->  127.0.0.1:$BackendPort"
 if (-not (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)) {
     & $nssm install $ServiceName $VenvPy ('"' + (Join-Path $RepoRoot 'app.py') + '"')
-    if ($LASTEXITCODE -ne 0) { throw "nssm install failed" }
+    if ($LASTEXITCODE -ne 0) { $ErrorActionPreference = 'Stop'; throw "nssm install failed" }
     Write-Ok "Service installed"
 } else { Write-Ok "Service exists  -  updating settings" }
 
@@ -233,16 +237,24 @@ $envExtra = @(
 if ($tessCmd) { $envExtra += "TESSERACT_CMD=$tessCmd" }
 & $nssm set $ServiceName AppEnvironmentExtra $envExtra
 
-& $nssm start $ServiceName 2>&1 | Out-Null
-Start-Sleep -Seconds 3
-$svcNow = Get-Service $ServiceName
-if ($svcNow.Status -ne 'Running') {
-    $err = ''
+& $nssm start $ServiceName 2>&1 | Out-Null   # PENDING on stderr is normal
+$deadline = (Get-Date).AddSeconds(120)       # PaddleOCR init on 1st start is slow
+do {
+    Start-Sleep -Seconds 4
+    $st = (Get-Service $ServiceName).Status
+    Write-Host "    service status: $st" -ForegroundColor DarkGray
+} while ($st -notin 'Running','Stopped' -and (Get-Date) -lt $deadline)
+$ErrorActionPreference = 'Stop'
+
+if ($st -ne 'Running') {
     $errLog = Join-Path $Logs 'service-err.log'
-    if (Test-Path $errLog) { $err = (Get-Content $errLog -Tail 25 | Out-String) }
-    throw "Service '$ServiceName' did not reach Running (status: $($svcNow.Status)).`n" +
-          "Last lines of $errLog :`n$err`n" +
-          "Try:  & '$VenvPy' '$($RepoRoot)\app.py'   to see the error directly."
+    $outLog = Join-Path $Logs 'service-out.log'
+    $tail = foreach ($l in $errLog,$outLog) {
+        if (Test-Path $l) { "--- $l (tail) ---`n" + (Get-Content $l -Tail 30 | Out-String) }
+    }
+    throw ("Service '$ServiceName' status is '$st' after 120s.`n$tail`n" +
+           "Reproduce the error directly with:`n" +
+           "   `$env:USERPROFILE='$Home_'; & '$VenvPy' '$RepoRoot\app.py'")
 }
 Write-Ok "Service '$ServiceName' running"
 
