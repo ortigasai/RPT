@@ -100,7 +100,7 @@ if (-not $py) {
 if (-not $py) {
     throw "Need Python 3.10-3.12 (this server appears to have a newer one that paddlepaddle has no wheels for). Install Python 3.12 from python.org, then re-run  -  or re-run with -PythonExe C:\path\to\python312\python.exe"
 }
-$pyver = & $py -c "import sys;print('%d.%d.%d'%sys.version_info[:3])"
+$pyver = & $py -c "import sys;print('%d.%d.%d'%sys.version_info[:3])"  2>$null
 Write-Ok "Python: $py  (v$pyver)"
 
 $rewriteDll = Join-Path $env:SystemRoot 'System32\inetsrv\rewrite.dll'
@@ -142,23 +142,28 @@ if ((Test-Path $VenvPy) -and -not (Test-PySupported $VenvPy)) {
     Write-Warn2 "Existing .venv was built with an unsupported Python  -  recreating"
     Remove-Item $Venv -Recurse -Force
 }
-if (-not (Test-Path $VenvPy)) { & $py -m venv $Venv }
-& $VenvPy -m pip install --upgrade pip --quiet
-& $VenvPy -m pip install -r (Join-Path $RepoRoot 'requirements.txt')
+if (-not (Test-Path $VenvPy)) { & $py -m venv $Venv 2>&1 | Out-Host }
+# 2>&1 | Out-Host: pip writes WARNING/deprecation lines to stderr, which in
+# Windows PowerShell 5.1 with EAP=Stop would abort the script on their own.
+& $VenvPy -m pip install --upgrade pip 2>&1 | Out-Host
+& $VenvPy -m pip install -r (Join-Path $RepoRoot 'requirements.txt') 2>&1 | Out-Host
 if ($LASTEXITCODE -ne 0) {
     throw "pip install failed  -  see the errors above. Most likely the venv Python is unsupported (paddlepaddle needs 3.10-3.12) or the server has no internet access to PyPI."
 }
-& $VenvPy -m pip install --quiet setuptools
-# sanity: the imports the app actually needs
-& $VenvPy -c "import flask, sqlalchemy, dotenv, cv2, paddleocr, fitz" 2>$null
-if ($LASTEXITCODE -ne 0) { throw "venv is missing core packages after pip install  -  check the pip output above." }
+& $VenvPy -m pip install setuptools 2>&1 | Out-Host
+# sanity: the imports the app actually needs. Some libs (paddle) print INFO/
+# warnings to stderr on import; in PS 5.1 with EAP=Stop that alone aborts the
+# script, so capture everything (2>&1) and check for our marker string only.
+$probe = & $VenvPy -c "import flask,sqlalchemy,dotenv,cv2,paddleocr,pymupdf,openpyxl,bcrypt,psycopg; print('IMPORTS-OK')" 2>&1 | Out-String
+if ($probe -notmatch 'IMPORTS-OK') { throw "venv is missing a core package after pip install:`n$probe" }
 Write-Ok "venv ready ($pyver)"
 
 # --- Database schema  (cwt's `prisma migrate deploy` analogue) ----------
 Write-Step "Applying the database schema (RPT)"
 Push-Location $RepoRoot
 try {
-    & $VenvPy -m rpt.db upgrade
+    $schema = & $VenvPy -m rpt.db upgrade 2>&1 | Out-String
+    Write-Host ("    " + $schema.Trim()) -ForegroundColor DarkGray
     if ($LASTEXITCODE -ne 0) {
         Write-Warn2 "Schema step reported a problem  -  check DATABASE_URL in .env and that the 'RPT' database exists and is reachable. The app will still start (runs just won't be saved)."
     } else { Write-Ok "Schema is up to date" }
