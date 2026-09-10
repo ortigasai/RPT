@@ -215,7 +215,8 @@ def _iso(v) -> str:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(message)s",
+                        stream=sys.stdout)  # keep off stderr (PS 5.1 treats it as error)
     cmd = sys.argv[1] if len(sys.argv) > 1 else "check"
     if cmd == "check":
         ok, msg = check()

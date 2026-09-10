@@ -324,16 +324,27 @@ Start-Website -Name $SiteName
 icacls $IisRoot /grant "IIS_IUSRS:(OI)(CI)RX" /grant "IUSR:(OI)(CI)RX" | Out-Null
 Write-Ok "IIS site '$SiteName' is up"
 
-# --- Firewall: allow TCP $FrontendPort on the LAN (Domain + Private) --------
-# Inbound = other machines can reach the site.  Outbound = also allowed
-# explicitly, for servers whose outbound policy is set to Block.
-Write-Step "Firewall rules for TCP $FrontendPort (Domain, Private)"
+# --- Firewall: allow TCP $FrontendPort inbound + outbound ------------------
+# -Profile Any: a server can sit on the Public profile if the DC wasn't
+# reachable at boot, and a Domain/Private-only rule then never applies.
+Write-Step "Firewall rules for TCP $FrontendPort (all profiles)"
 Get-NetFirewallRule -DisplayName "RPT HTTP $FrontendPort*" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
 New-NetFirewallRule -DisplayName "RPT HTTP $FrontendPort (in)"  -Direction Inbound  `
-    -Action Allow -Protocol TCP -LocalPort $FrontendPort -Profile Domain,Private -Enabled True | Out-Null
+    -Action Allow -Protocol TCP -LocalPort $FrontendPort -Profile Any -Enabled True | Out-Null
 New-NetFirewallRule -DisplayName "RPT HTTP $FrontendPort (out)" -Direction Outbound `
-    -Action Allow -Protocol TCP -LocalPort $FrontendPort -Profile Domain,Private -Enabled True | Out-Null
+    -Action Allow -Protocol TCP -LocalPort $FrontendPort -Profile Any -Enabled True | Out-Null
 Write-Ok "Inbound + outbound allow rules set for TCP $FrontendPort"
+
+# heads-up if a domain GPO would override the local rule we just made
+$prof = Get-NetFirewallProfile -ErrorAction SilentlyContinue |
+        Where-Object { $_.Enabled -and $_.AllowLocalFirewallRules -eq $false }
+if ($prof) {
+    Write-Warn2 ("Firewall profile(s) [" + ($prof.Name -join ', ') +
+        "] have AllowLocalFirewallRules=False (GPO-managed). The rule above may be " +
+        "ignored - IT must open inbound TCP $FrontendPort in the domain policy.")
+}
+$active = Get-NetConnectionProfile -ErrorAction SilentlyContinue
+if ($active) { Write-Host ("    active network profile: " + ($active.NetworkCategory -join ', ')) -ForegroundColor DarkGray }
 
 # --- Health check --------------------------------------------------
 Write-Step "Health check (PaddleOCR warm-up can take ~60 s on first start)"
