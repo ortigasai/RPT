@@ -100,12 +100,15 @@ if ($SkipDbDump) {
 }
 
 # --- 2. project files ------------------------------------------------
-Write-Step "Mirroring project  ->  $DestRoot"
-$xd = @('.venv','__pycache__','.git','logs','home','vendor','models','iis','_work','_migration-output','.vscode','.idea') |
+# Includes .git so C:\RPT on the server is a true mirror of the repo (and
+# `git pull` works there later). Excludes only the rebuilt/server-generated
+# trees and the local venv.
+Write-Step "Mirroring project (incl. .git)  ->  $DestRoot"
+$xd = @('.venv','__pycache__','logs','home','vendor','models','iis','_work','_migration-output','.vscode','.idea') |
       ForEach-Object { Join-Path $RepoRoot $_ }
 robocopy $RepoRoot $DestRoot /MIR /R:2 /W:3 /NFL /NDL /NJH /NJS /NP `
     /XD $xd `
-    /XF '*.xlsx' '*.log' 'RPT-migration-*.zip' | Out-Null
+    /XF '*.log' 'RPT-migration-*.zip' | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy of the project failed ($LASTEXITCODE)" }
 Write-Ok "project mirrored"
 
@@ -113,12 +116,13 @@ Write-Ok "project mirrored"
 Write-Step "Copying .env / broker_config.json (secrets  -  not in git)"
 $destEnv = Join-Path $DestRoot '.env'
 Copy-Item $envFile $destEnv -Force
-# server-specific overrides
+# server-specific overrides (ports; HOME for the NSSM service so PaddleOCR's
+# ~/.paddleocr cache - which we mirror to C:\RPT\home\.paddleocr below - is
+# what it reads. deploy-iis.ps1 also sets USERPROFILE on the service itself.)
 $serverEnv = Get-Content $destEnv
 $serverEnv = $serverEnv -replace '^\s*RPT_PORT\s*=.*', "RPT_PORT=$ServerBackendPort"
 $serverEnv = $serverEnv -replace '^\s*RPT_HOST\s*=.*', 'RPT_HOST=127.0.0.1'
-if ($serverEnv -notmatch '^\s*RPT_PADDLE_MODELS\s*=') { $serverEnv += 'RPT_PADDLE_MODELS=C:/RPT/models/paddleocr' }
-if ($serverEnv -notmatch '^\s*USERPROFILE\s*=')        { $serverEnv += 'USERPROFILE=C:/RPT/home' }
+if ($serverEnv -notmatch '^\s*USERPROFILE\s*=') { $serverEnv += 'USERPROFILE=C:/RPT/home' }
 Set-Content $destEnv $serverEnv -Encoding UTF8
 Write-Ok "C:\RPT\.env written (RPT_PORT=$ServerBackendPort, RPT_HOST=127.0.0.1)  -  review it on the server"
 
