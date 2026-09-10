@@ -136,38 +136,48 @@ if ($svc -and $svc.Status -ne 'Stopped') {
     catch { throw "'$ServiceName' did not stop within 30s  -  stop it manually and re-run." }
 }
 
-# --- Build the venv --------------------------------------------------
+# === native Python/pip calls below ===================================
+# Windows PowerShell 5.1 turns ANY line a native exe writes to stderr into a
+# terminating error when $ErrorActionPreference='Stop' - pip WARNINGs, paddle
+# INFO lines, "INFO: Could not find files" from where.exe, etc. - and 2>&1
+# does NOT prevent it. Relax EAP for this whole section and gate on
+# $LASTEXITCODE / captured output instead.
+$ErrorActionPreference = 'Continue'
+
 Write-Step "Building the Python environment"
 if ((Test-Path $VenvPy) -and -not (Test-PySupported $VenvPy)) {
     Write-Warn2 "Existing .venv was built with an unsupported Python  -  recreating"
     Remove-Item $Venv -Recurse -Force
 }
-if (-not (Test-Path $VenvPy)) { & $py -m venv $Venv 2>&1 | Out-Host }
-# 2>&1 | Out-Host: pip writes WARNING/deprecation lines to stderr, which in
-# Windows PowerShell 5.1 with EAP=Stop would abort the script on their own.
-& $VenvPy -m pip install --upgrade pip 2>&1 | Out-Host
-& $VenvPy -m pip install -r (Join-Path $RepoRoot 'requirements.txt') 2>&1 | Out-Host
-if ($LASTEXITCODE -ne 0) {
-    throw "pip install failed  -  see the errors above. Most likely the venv Python is unsupported (paddlepaddle needs 3.10-3.12) or the server has no internet access to PyPI."
+if (-not (Test-Path $VenvPy)) { & $py -m venv $Venv }
+& $VenvPy -m pip install --upgrade pip -q
+& $VenvPy -m pip install -q -r (Join-Path $RepoRoot 'requirements.txt')
+$pipExit = $LASTEXITCODE
+& $VenvPy -m pip install -q setuptools
+if ($pipExit -ne 0) {
+    $ErrorActionPreference = 'Stop'
+    throw "pip install failed (exit $pipExit)  -  Python must be 3.10-3.12 (paddlepaddle has no newer wheels) and the server needs PyPI access."
 }
-& $VenvPy -m pip install setuptools 2>&1 | Out-Host
-# sanity: the imports the app actually needs. Some libs (paddle) print INFO/
-# warnings to stderr on import; in PS 5.1 with EAP=Stop that alone aborts the
-# script, so capture everything (2>&1) and check for our marker string only.
-$probe = & $VenvPy -c "import flask,sqlalchemy,dotenv,cv2,paddleocr,pymupdf,openpyxl,bcrypt,psycopg; print('IMPORTS-OK')" 2>&1 | Out-String
-if ($probe -notmatch 'IMPORTS-OK') { throw "venv is missing a core package after pip install:`n$probe" }
+$probe = (& $VenvPy -c "import flask,sqlalchemy,dotenv,cv2,paddleocr,pymupdf,openpyxl,bcrypt,psycopg;print('IMPORTS-OK')" 2>&1 | Out-String)
+if ($probe -notmatch 'IMPORTS-OK') {
+    $ErrorActionPreference = 'Stop'
+    throw "venv is missing a core package after pip install:`n$probe"
+}
 Write-Ok "venv ready ($pyver)"
 
 # --- Database schema  (cwt's `prisma migrate deploy` analogue) ----------
 Write-Step "Applying the database schema (RPT)"
 Push-Location $RepoRoot
 try {
-    $schema = & $VenvPy -m rpt.db upgrade 2>&1 | Out-String
-    Write-Host ("    " + $schema.Trim()) -ForegroundColor DarkGray
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warn2 "Schema step reported a problem  -  check DATABASE_URL in .env and that the 'RPT' database exists and is reachable. The app will still start (runs just won't be saved)."
+    $schema = (& $VenvPy -m rpt.db upgrade 2>&1 | Out-String).Trim()
+    $schemaExit = $LASTEXITCODE
+    if ($schema) { Write-Host "    $schema" -ForegroundColor DarkGray }
+    if ($schemaExit -ne 0) {
+        Write-Warn2 "Schema step reported a problem  -  check DATABASE_URL in .env and that the 'RPT' database is reachable. The app still starts (runs just won't be saved)."
     } else { Write-Ok "Schema is up to date" }
 } finally { Pop-Location }
+
+$ErrorActionPreference = 'Stop'   # === back to strict ================
 
 # --- Tesseract (optional fallback engine) ------------------------------
 $tessCmd = ''
@@ -182,11 +192,13 @@ if ($tessCmd) { Write-Ok "Tesseract: $tessCmd" } else { Write-Warn2 "No Tesserac
 # --- Warm the PaddleOCR models --------------------------------------
 Write-Step "Warming PaddleOCR models into $Home_\.paddleocr"
 $env:USERPROFILE = $Home_
+$ErrorActionPreference = 'Continue'   # paddle import spews INFO to stderr
 Push-Location $RepoRoot
 try {
-    & $VenvPy -c "import sys; sys.path.insert(0,'.'); from rpt import ocr_paddle; print('warmup', ocr_paddle.warmup())"
-} catch { Write-Warn2 "Model warm-up failed ($($_.Exception.Message))  -  the service will retry on first request." }
-finally { Pop-Location }
+    $warm = (& $VenvPy -c "import sys; sys.path.insert(0,'.'); from rpt import ocr_paddle; print('WARMUP', ocr_paddle.warmup())" 2>&1 | Out-String).Trim()
+    if ($warm -match 'WARMUP True') { Write-Ok "models ready" }
+    else { Write-Warn2 "Warm-up didn't confirm ($warm)  -  the service will retry on first request." }
+} finally { Pop-Location; $ErrorActionPreference = 'Stop' }
 
 # --- NSSM service ---------------------------------------------------
 Write-Step "Installing/updating the backend service ('$ServiceName')  ->  127.0.0.1:$BackendPort"
@@ -221,7 +233,17 @@ $envExtra = @(
 if ($tessCmd) { $envExtra += "TESSERACT_CMD=$tessCmd" }
 & $nssm set $ServiceName AppEnvironmentExtra $envExtra
 
-Start-Service $ServiceName
+& $nssm start $ServiceName 2>&1 | Out-Null
+Start-Sleep -Seconds 3
+$svcNow = Get-Service $ServiceName
+if ($svcNow.Status -ne 'Running') {
+    $err = ''
+    $errLog = Join-Path $Logs 'service-err.log'
+    if (Test-Path $errLog) { $err = (Get-Content $errLog -Tail 25 | Out-String) }
+    throw "Service '$ServiceName' did not reach Running (status: $($svcNow.Status)).`n" +
+          "Last lines of $errLog :`n$err`n" +
+          "Try:  & '$VenvPy' '$($RepoRoot)\app.py'   to see the error directly."
+}
 Write-Ok "Service '$ServiceName' running"
 
 # --- web.config into C:\RPT\iis ------------------------------------
