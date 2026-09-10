@@ -1,27 +1,71 @@
-"""RPT Assessment extractor — LAN web app.
+"""RPT Assessment extractor — web app (Flask backend, PostgreSQL, IIS/NSSM prod).
 
 Run:  python app.py       (then open the printed http://<your-ip>:5000 URL)
+Config comes from the environment / a local .env file (see .env.example).
 """
 from __future__ import annotations
 
+import hmac
 import io
+import logging
+import os
 import pathlib
 import socket
 import time
 import traceback
 import uuid
 
-from flask import (Flask, jsonify, render_template, request, send_file,
-                   send_from_directory)
+# Load .env (dev laptop and the server both keep real config there, not in git)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(pathlib.Path(__file__).resolve().parent / ".env")
+except Exception:
+    pass
 
-from rpt import ocr
+from flask import (Flask, Response, jsonify, render_template, request,
+                   send_file, send_from_directory)
+
+from rpt import db, ocr
 from rpt.excel import build_workbook
 from rpt.fetch import FetchError, fetch_pdfs
 from rpt.parsers import LOCATIONS, get_parser
 from rpt.review import review
 
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024
+
+db.init()
+
+# --------------------------------------------------------------------------- #
+# Optional shared-login gate (matches cwt-tax-portal). Enabled only when
+# AUTH_USERNAME + AUTH_PASSWORD_HASH (bcrypt) are set in the environment.
+# --------------------------------------------------------------------------- #
+_AUTH_USER = os.environ.get("AUTH_USERNAME", "").strip()
+_AUTH_HASH = os.environ.get("AUTH_PASSWORD_HASH", "").strip().encode()
+_AUTH_ON = bool(_AUTH_USER and _AUTH_HASH)
+_OPEN_PATHS = ("/health", "/favicon.ico")
+
+
+def _check_pw(pw: str) -> bool:
+    try:
+        import bcrypt
+        return bcrypt.checkpw(pw.encode(), _AUTH_HASH)
+    except Exception:
+        return False
+
+
+@app.before_request
+def _require_login():
+    if not _AUTH_ON or request.path in _OPEN_PATHS:
+        return None
+    a = request.authorization
+    if a and hmac.compare_digest(a.username or "", _AUTH_USER) and _check_pw(a.password or ""):
+        return None
+    return Response("Authentication required.", 401,
+                    {"WWW-Authenticate": 'Basic realm="RPT Assessment"'})
 
 # token -> {"bytes":..., "name":..., "ts":...}
 _RESULTS: dict[str, dict] = {}
@@ -54,6 +98,20 @@ def index():
 @app.get("/favicon.ico")
 def favicon():
     return ("", 204)
+
+
+@app.get("/health")
+def health():
+    ok_db, db_msg = db.check()
+    h = ocr.health()
+    return jsonify(
+        status="ok",
+        ocr_backend=h.get("backend"),
+        ocr_ready=h.get("ocr_ready"),
+        database=("ok" if ok_db else "unavailable"),
+        database_detail=db_msg if not ok_db else db_msg[:60],
+        auth=("on" if _AUTH_ON else "off"),
+    )
 
 
 SAMPLE_DIR = pathlib.Path(__file__).resolve().parent
@@ -139,12 +197,17 @@ def extract():
 
     xlsx = build_workbook(location, columns, all_rows, notes,
                           [n for n, _ in sources], flagged=result.rows_flagged)
+    fname = f"RPT_{location.replace(' ', '_')}_{time.strftime('%Y%m%d_%H%M')}.xlsx"
     token = uuid.uuid4().hex
-    _RESULTS[token] = {
-        "bytes": xlsx,
-        "name": f"RPT_{location.replace(' ', '_')}_{time.strftime('%Y%m%d_%H%M')}.xlsx",
-        "ts": time.time(),
-    }
+    _RESULTS[token] = {"bytes": xlsx, "name": fname, "ts": time.time()}
+
+    src_label = link.strip() if link else "upload: " + ", ".join(n for n, _ in sources)
+    run_id = db.record_run(
+        location=location, source=src_label, files=[n for n, _ in sources],
+        row_count=len(all_rows), rows_flagged=result.rows_flagged,
+        seconds=round(took, 1), columns=columns, rows=all_rows, notes=notes,
+        xlsx=xlsx, xlsx_name=fname,
+    )
 
     return jsonify(
         location=location,
@@ -156,7 +219,32 @@ def extract():
         notes=notes,
         files=[n for n, _ in sources],
         download=f"/download/{token}",
+        run_id=run_id,
+        saved=run_id is not None,
     )
+
+
+@app.get("/runs")
+def runs():
+    return jsonify(runs=db.list_runs(limit=int(request.args.get("limit", 100))),
+                   database=("ok" if db.enabled() else "off"))
+
+
+@app.get("/runs/<int:run_id>")
+def run_detail(run_id: int):
+    r = db.get_run(run_id)
+    return (jsonify(r), 200) if r else (jsonify(error="run not found"), 404)
+
+
+@app.get("/runs/<int:run_id>.xlsx")
+def run_xlsx(run_id: int):
+    got = db.get_xlsx(run_id)
+    if not got:
+        return "Not found (no database, or run has no stored workbook).", 404
+    name, data = got
+    return send_file(io.BytesIO(data), as_attachment=True, download_name=name,
+                     mimetype="application/vnd.openxmlformats-officedocument."
+                              "spreadsheetml.sheet")
 
 
 @app.get("/download/<token>")
@@ -171,8 +259,6 @@ def download(token: str):
 
 
 if __name__ == "__main__":
-    import os
-
     # Port/host are configurable so the same app.py runs behind IIS on the
     # server (RPT_PORT=7373, RPT_HOST=127.0.0.1) and standalone on a laptop.
     port = int(os.environ.get("RPT_PORT", os.environ.get("PORT", "5000")))
@@ -184,11 +270,14 @@ if __name__ == "__main__":
         ocr_paddle.warmup()
     except Exception:
         pass
+    ok_db, _ = db.check()
     print("\n" + "=" * 62)
     print("  RPT Assessment extractor is running.")
-    print(f"  Local:   http://127.0.0.1:{port}")
+    print(f"  Local:    http://127.0.0.1:{port}")
     if host == "0.0.0.0":
-        print(f"  Network: http://{ip}:{port}")
+        print(f"  Network:  http://{ip}:{port}")
+    print(f"  Database: {'connected' if ok_db else 'not connected (runs not saved)'}")
+    print(f"  Login:    {'required' if _AUTH_ON else 'open'}")
     print("  Press CTRL+C to stop.")
     print("=" * 62 + "\n")
     app.run(host=host, port=port, debug=False, threaded=True)

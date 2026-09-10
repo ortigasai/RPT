@@ -5,6 +5,12 @@ pillow==12.3.0
 numpy==2.5.2
 openpyxl==3.1.5
 requests==2.34.2
+python-dotenv>=1.0
+
+# PostgreSQL persistence (DATABASE_URL in .env) + optional shared-login gate
+SQLAlchemy>=2.0
+psycopg[binary]>=3.1
+bcrypt>=4.1
 
 # OCR — deep-learning engine, runs offline (model weights download once, ~15 MB).
 paddlepaddle==3.0.0

@@ -3,12 +3,18 @@
 A small web app: choose an LGU, point it at the real-property-tax PDF(s),
 and get a downloadable Excel file plus an on-screen summary.
 
-## Run it
+## Run it (dev laptop)
 
-Double-click **`Start RPT Extractor.bat`**.
+1. `copy .env.example .env` and fill it in (at least `DATABASE_URL` and
+   `RPT_BROKER_KEY`). `.env` is git-ignored.
+2. Double-click **`Start RPT Extractor.bat`** (or `restart-portal.ps1`).
 
-The first run installs everything (needs internet once). After that it just
-starts. A browser opens at `http://127.0.0.1:5000`.
+The first run installs everything (needs internet once). A browser opens at
+`http://127.0.0.1:5000`. The console prints whether the database connected —
+without it the app still works, it just doesn't save runs.
+
+**Server deployment** (IIS + NSSM + PostgreSQL, ports 7272/7373, `C:\RPT`):
+see [`deploy/DEPLOYMENT.md`](deploy/DEPLOYMENT.md).
 
 The console window prints a second address like `http://192.168.1.23:5000` —
 open that on any other laptop **on the same Wi-Fi** to use the app from there.
@@ -62,14 +68,23 @@ of columns you need to get a proper extractor for them.
 
 | Path | Purpose |
 |------|---------|
-| `app.py` | web server (Flask), binds `0.0.0.0:5000` |
+| `app.py` | web server (Flask); port/host from `RPT_PORT` / `RPT_HOST` (default 5000 / 0.0.0.0) |
 | `rpt/ocr.py` | backend picker + Tesseract path + shared data model |
 | `rpt/ocr_paddle.py` | PaddleOCR path (default when installed) |
 | `rpt/parsers/` | one module per location |
-| `rpt/fetch.py` | turn a share link into PDF bytes |
+| `rpt/fetch.py` + `rpt/broker.py` | resolve a link / Permits&Reg path to PDF bytes |
 | `rpt/excel.py` | build the `.xlsx` |
+| `rpt/review.py` | per-row completeness + arithmetic checks (the "Review" column) |
+| `rpt/db.py` | PostgreSQL persistence of extraction runs (`python -m rpt.db check`) |
 | `templates/index.html` | the page |
+| `deploy/` | IIS + NSSM + Postgres server deployment (see `DEPLOYMENT.md`) |
+| `.env` / `.env.example` / `.env.production.example` | config; `.env` is git-ignored |
 | `tools/` | dev helpers (not needed to run) |
+
+## Endpoints
+
+`/` UI · `/extract` (POST) · `/download/<token>` · `/health` · `/runs`,
+`/runs/<id>`, `/runs/<id>.xlsx` (past runs, when a database is configured).
 
 ## Requirements
 

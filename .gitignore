@@ -1,4 +1,7 @@
-# ---- local secrets — never commit / share ----
+# ---- secrets / local config - never commit ----
+.env
+.env.local
+.env.production
 broker_config.json
 
 # ---- python env ----
@@ -14,13 +17,16 @@ logs/
 *.xlsx
 *.log
 
-# ---- server-only, produced by deploy/migration ----
+# ---- server-only, produced by deploy / migrate-data ----
 vendor/            # bundled Tesseract etc.
 models/            # bundled PaddleOCR weights
-iis/               # generated IIS site folder (web.config lives in deploy/)
+home/              # HOME for the NSSM service (PaddleOCR cache)
+iis/               # generated IIS site folder
 tools/nssm.exe
+deploy/_migration-output/
 deploy/*.zip
 deploy/_work/
+migration/
 
 # ---- editor / OS ----
 .vscode/
