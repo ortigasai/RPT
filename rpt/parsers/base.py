@@ -70,10 +70,16 @@ class ParseResult:
 
 class Parser:
     location: str = ""
-    columns: list[str] = []
+    columns: list[str] = []          # display headers (what the user sees)
+    # row-dict keys, when a header is duplicated / differs from its key.
+    # Same length/order as `columns`; falls back to `columns`.
+    column_keys: list[str] | None = None
     ocr_mode: str = "plain"
     dpi: int = 400
     psm: int = 6
+
+    def keys(self) -> list[str]:
+        return self.column_keys if self.column_keys else self.columns
 
     def parse_document(self, doc: Document) -> list[dict]:  # pragma: no cover
         raise NotImplementedError

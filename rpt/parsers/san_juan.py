@@ -18,8 +18,14 @@ _SKIP = re.compile(r"TOTALS|GRAND|NAME OF TAXPAYER|ADDRESS|PLEASE PAY|REPUBLIC|"
 class SanJuanParser(Parser):
     location = "San Juan City"
     ocr_mode = "plain"
+    #        headers (the SOA form has two "Penalty" columns)
     columns = [
-        "Page Number", "PIN", "TDN", "Assessed Value", "Year", "QTR",
+        "Page no", "PIN", "TDN", "Assessed Value", "Year", "QTR",
+        "Basic", "%B DSC", "Penalty", "SEF", "%S DSC", "Penalty", "Total",
+    ]
+    #        row-dict keys (SEF penalty disambiguated)
+    column_keys = [
+        "Page no", "PIN", "TDN", "Assessed Value", "Year", "QTR",
         "Basic", "%B DSC", "Penalty", "SEF", "%S DSC", "Penalty (SEF)", "Total",
     ]
 
@@ -58,7 +64,7 @@ class SanJuanParser(Parser):
                     basic, b_dsc, pen_b, _bt, sef, s_dsc, pen_s = nums[:7]
                     total = nums[-1]
                     rows.append({
-                        "Page Number": page.number,
+                        "Page no": page.number,
                         "PIN": pin or "",
                         "TDN": tdn or "",
                         "Assessed Value": assessed,

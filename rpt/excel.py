@@ -28,9 +28,11 @@ def _is_numeric_col(name: str) -> bool:
     return any(h in low for h in _NUMERIC_HINTS)
 
 
-def build_workbook(location: str, columns: list[str], rows: list[dict],
+def build_workbook(location: str, columns: list[str],
+                   column_keys: list[str] | None, rows: list[dict],
                    notes: list[str], source_files: list[str],
                    flagged: int = 0) -> bytes:
+    keys = column_keys if column_keys else columns
     wb = Workbook()
 
     ws = wb.active
@@ -47,8 +49,8 @@ def build_workbook(location: str, columns: list[str], rows: list[dict],
     review_idx = columns.index("Review") if "Review" in columns else -1
     for ridx, r in enumerate(rows, start=2):
         values = []
-        for i, col in enumerate(columns):
-            v = r.get(col, "")
+        for i, key in enumerate(keys):
+            v = r.get(key, "")
             if i in numeric_cols and isinstance(v, (int, float)):
                 values.append(float(v))
             else:
@@ -62,7 +64,7 @@ def build_workbook(location: str, columns: list[str], rows: list[dict],
     for i in range(len(columns)):
         letter = get_column_letter(i + 1)
         width = max([len(str(columns[i]))] +
-                    [len(str(r.get(columns[i], ""))) for r in rows[:200]] + [8])
+                    [len(str(r.get(keys[i], ""))) for r in rows[:200]] + [8])
         ws.column_dimensions[letter].width = min(max(width + 2, 10), 40)
         if i in numeric_cols:
             for row in range(2, len(rows) + 2):

@@ -180,13 +180,15 @@ def extract():
     took = time.time() - t0
 
     # --- reviewer pass (repair + flag) BEFORE producing any output ----------
-    result = review(location, parser.columns, all_rows)
+    result = review(location, parser.keys(), all_rows)
     all_rows = result.rows
     for r, iss in zip(all_rows, result.issues_by_row):
         r["Review"] = "; ".join(iss)
     notes = result.summary + notes
 
-    columns = parser.columns + ["Review"] + (["Source file"] if len(sources) > 1 else [])
+    extra = ["Review"] + (["Source file"] if len(sources) > 1 else [])
+    columns = parser.columns + extra        # display headers
+    column_keys = parser.keys() + extra     # row-dict keys (== columns unless dup'd)
 
     if location in ("Mandaluyong City", "Pampanga"):
         notes.insert(0, "No column layout is defined for this location yet — "
@@ -195,7 +197,7 @@ def extract():
     notes.append("OCR-read from scanned PDFs — verify every figure against the "
                  "source before use.")
 
-    xlsx = build_workbook(location, columns, all_rows, notes,
+    xlsx = build_workbook(location, columns, column_keys, all_rows, notes,
                           [n for n, _ in sources], flagged=result.rows_flagged)
     fname = f"RPT_{location.replace(' ', '_')}_{time.strftime('%Y%m%d_%H%M')}.xlsx"
     token = uuid.uuid4().hex
@@ -212,6 +214,7 @@ def extract():
     return jsonify(
         location=location,
         columns=columns,
+        column_keys=column_keys,
         rows=all_rows[:1000],
         row_count=len(all_rows),
         rows_flagged=result.rows_flagged,

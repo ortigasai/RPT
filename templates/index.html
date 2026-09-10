@@ -159,17 +159,19 @@ function render(d) {
 
   const tbl = document.getElementById('tbl');
   tbl.innerHTML = '';
+  const headers = d.columns;
+  const keys = d.column_keys || d.columns;   // dict keys, when a header repeats
   const thead = tbl.createTHead().insertRow();
-  d.columns.forEach(c => { const th = document.createElement('th'); th.textContent = c; thead.appendChild(th); });
+  headers.forEach(c => { const th = document.createElement('th'); th.textContent = c; thead.appendChild(th); });
   const tb = tbl.createTBody();
   d.rows.forEach(r => {
     const tr = tb.insertRow();
     if (String(r['Review'] || '').trim()) tr.className = 'flag';
-    d.columns.forEach(c => {
+    keys.forEach((k, i) => {
       const td = tr.insertCell();
-      let v = r[c]; if (v === null || v === undefined) v = '';
+      let v = r[k]; if (v === null || v === undefined) v = '';
       td.textContent = v;
-      if (c === 'Review') td.className = 'review';
+      if (headers[i] === 'Review') td.className = 'review';
       else if (typeof v === 'number' || (typeof v === 'string' && v && numRe.test(v.trim()))) td.className = 'num';
     });
   });

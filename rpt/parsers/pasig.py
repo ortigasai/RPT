@@ -13,7 +13,16 @@ _MONEY = re.compile(r"\(?-?[\d,]+\.\d{2}\)?")
 class PasigParser(Parser):
     location = "Pasig City"
     ocr_mode = "plain"
+    #        headers (the SOA has two "Interest/(Discount)" columns)
     columns = [
+        "Page no.", "Account No.", "Barangay", "Tax Declaration (TD) No.",
+        "Owner's name", "PIN", "Bldg. Area (sq. m.)", "Assessed Value",
+        "Period Covered", "Idle Land Tax", "Idle Land Tax Coverage",
+        "Basic Tax", "Interest/(Discount)", "SEF Tax", "Interest/(Discount)",
+        "Amount Due",
+    ]
+    #        row-dict keys (SEF interest disambiguated)
+    column_keys = [
         "Page no.", "Account No.", "Barangay", "Tax Declaration (TD) No.",
         "Owner's name", "PIN", "Bldg. Area (sq. m.)", "Assessed Value",
         "Period Covered", "Idle Land Tax", "Idle Land Tax Coverage",
