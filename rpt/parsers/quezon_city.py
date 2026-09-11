@@ -39,8 +39,16 @@ LBL = {
 }
 
 
+_OD_ZERO = re.compile(r"\(?-?[0-9OoDd]{1,3}(?:,[0-9OoDd]{3})*\.[0-9OoDd]{2}\)?")
+
+
 def _norm_money(tok: str) -> str:
     tok = tok.replace("{", "(").replace("}", ")").replace(":", ".").replace(" ", "")
+    # OCR often reads a '0' as 'O' or 'D' inside an otherwise money-shaped
+    # token (e.g. "D.00", "{0.0D}") — safe to fix only once the token already
+    # looks like a money value (has the right shape around a literal dot).
+    if _OD_ZERO.fullmatch(tok):
+        tok = re.sub(r"[OoDd]", "0", tok)
     # "1.589.79" (dot as thousands sep) -> "1589.79"
     m = re.fullmatch(r"(\(?)(-?)(\d{1,3})\.(\d{3})\.(\d{2})(\)?)", tok)
     if m:
@@ -86,11 +94,16 @@ class QuezonCityParser(Parser):
             net = _val(page, LBL["Net Tax"])
             due = _val(page, LBL["Amount Due"]) or _val(page, LBL["Total"])
 
-            # Net Tax OCR's very badly under the watermark; when it's missing or
-            # clearly garbled and Penalty / SHTTC are ~0, it equals Amount Due.
-            if due is not None and _bad(net, due) and _z(penalty) and _z(shttc):
+            # Net Tax and Amount Due print the same total twice on this bill
+            # (confirmed across samples with zero AND nonzero Penalty), so a
+            # missing one can be recovered from the other. Only fill in a gap
+            # — never override a value OCR actually read, even if the two
+            # disagree: on one sample Net Tax and the Total line agreed with
+            # each other against a differently-misread Amount Due, so "prefer
+            # Amount Due" would have clobbered the more-corroborated figure.
+            if net is None and due is not None:
                 net = due
-            if net is not None and due is None and _z(penalty) and _z(shttc):
+            elif due is None and net is not None:
                 due = net
 
             rows.append({
@@ -116,34 +129,51 @@ class QuezonCityParser(Parser):
 
 # -- geometry helpers ------------------------------------------------------- #
 def _val(page: Page, label_rx: str) -> float | None:
-    """Right-column money value on (or vertically very near) the label's line.
-    The label text must itself start in the left half — avoids matching stray
-    words like 'TAX' / 'TOTAL' in header rows."""
+    """Money value for a label. The QC bill's rows are packed only ~10-16px
+    apart, so a wide y-tolerance around the label line can pick up the
+    adjacent row's value instead (e.g. City Share grabbing Tax(Advance)'s
+    amount, or Discount grabbing Net Tax's). Prefer the money token that sits
+    on the label's OWN line — true for nearly every row here — and only fall
+    back to a very close neighbouring line when the label's line has none."""
     rx = re.compile(label_rx, re.I)
     right_x = page.width * 0.55
-    label_ys = []
-    for ln in page.lines:
-        m = rx.search(ln.text)
-        if not m:
-            continue
-        lw = next((w for w in ln.words if rx.search(w.text)), ln.words[0] if ln.words else None)
-        if lw and lw.x0 < page.width * 0.6:
-            label_ys.append((ln.top + ln.bottom) / 2)
-    if not label_ys:
-        return None
     lh = _line_h(page)
-    best = None
-    for ln in page.lines:
-        cy = (ln.top + ln.bottom) / 2
-        if min(abs(cy - y) for y in label_ys) > 0.9 * lh:
-            continue
+
+    def money_on(ln) -> str | None:
+        best = None
         for w in ln.words:
             tok = _norm_money(w.text)
             if PCT.match(tok) or not MONEY.fullmatch(tok) or w.x0 < right_x:
                 continue
             if best is None or w.x0 > best[0]:
                 best = (w.x0, tok)
-    return to_num(best[1]) if best else None
+        return best[1] if best else None
+
+    for ln in page.lines:
+        if not rx.search(ln.text):
+            continue
+        lw = next((w for w in ln.words if rx.search(w.text)), ln.words[0] if ln.words else None)
+        if not lw or lw.x0 >= page.width * 0.6:
+            continue
+        tok = money_on(ln)
+        if tok is not None:
+            return to_num(tok)
+        label_y = (ln.top + ln.bottom) / 2
+        best = None
+        for ln2 in page.lines:
+            if ln2 is ln:
+                continue
+            dy = abs((ln2.top + ln2.bottom) / 2 - label_y)
+            if dy > 0.4 * lh:
+                continue
+            tok2 = money_on(ln2)
+            if tok2 is None:
+                continue
+            if best is None or dy < best[0]:
+                best = (dy, tok2)
+        if best:
+            return to_num(best[1])
+    return None
 
 
 def _assessed(page: Page) -> float | None:
@@ -163,14 +193,29 @@ def _assessed(page: Page) -> float | None:
 
 
 def _owner(page: Page) -> str:
+    """Name + postal address, concatenated across every line of the box (the
+    box is literally labelled "Name and Postal Address of Owner" and the
+    Taxpayer Name column is expected to hold that whole block). The label's
+    own line is skipped — its right-hand cell is the Tax(Advance) row, not
+    part of the name, but a 0.5*width cutoff let that value bleed in (e.g.
+    "TAX(Advance" was returned as the owner). The cutoff is now set below the
+    right-column label start (~x0 316-320 on this form)."""
+    left_x = page.width * 0.45
     for i, ln in enumerate(page.lines):
         if re.search(r"Name and Postal|Postal Address of Own", ln.text, re.I):
-            for nxt in page.lines[i:i + 3]:
-                cand = " ".join(w.text for w in nxt.words if w.x0 < page.width * 0.5)
-                cand = re.sub(r"^.*?(?:OWNER|OWNE\??)\s*\d*\s*", "", cand, flags=re.I).strip()
-                if len(cand) >= 5 and re.search(r"[A-Z]{3}", cand) \
-                        and not re.search(r"LOCATION|LOT ?&|BLOCK|VERIFIED", cand, re.I):
-                    return cand
+            parts = []
+            for nxt in page.lines[i + 1:i + 5]:
+                if re.search(r"Location of Property|Lot\s*&\s*Block", nxt.text, re.I):
+                    break
+                cand = " ".join(w.text for w in nxt.words if w.x0 < left_x).strip()
+                if not cand:
+                    continue
+                if re.search(r"LOCATION|LOT ?&|BLOCK|VERIFIED", cand, re.I):
+                    break
+                parts.append(cand)
+            joined = " ".join(parts).strip()
+            if len(joined) >= 5 and re.search(r"[A-Z]{3}", joined):
+                return joined
     m = re.search(r"\b([A-Z][A-Z0-9 .,&'\-]{6,}?(?:CORPORATION|PARTNERSHIP|"
                   r"CORP|INC|COMPANY|\(SINGLE\)|\(MARRIED\)|SPS\.?))",
                   page.text)
@@ -202,15 +247,3 @@ def _fix_tdn(s):
 
 def _neg(v):
     return -abs(v) if isinstance(v, (int, float)) else v
-
-
-def _z(v):
-    return v is None or (isinstance(v, (int, float)) and abs(v) < 0.005)
-
-
-def _bad(net, due):
-    if net is None:
-        return True
-    if not isinstance(net, (int, float)) or not isinstance(due, (int, float)):
-        return False
-    return abs(net - due) > 0.05 + 0.01 * abs(due)

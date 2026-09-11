@@ -136,15 +136,21 @@ def _check_quezon(r) -> list[str]:
     if blank:
         out.append("value cell(s) not read by OCR: " + ", ".join(blank))
     net = parts["Net Tax"]
+    pen = parts["Penalty"]
     comp = [parts[k] for k in ("City Share", "Barangay Share",
                                "Special Education Fund", "Garbage Fee", "Discount")]
-    if net is not None and all(c is not None for c in comp):
-        want = sum(comp)
+    # Net Tax = (City+Barangay+SEF+Garbage+Discount) + Penalty — confirmed
+    # against real bills with both zero and nonzero Penalty; Penalty isn't
+    # baked into the shares themselves.
+    if net is not None and pen is not None and all(c is not None for c in comp):
+        want = sum(comp) + pen
         if not _close(net, want):
-            out.append(f"shares+discount = {want:,.2f} but Net Tax is {net:,.2f}")
-    due, pen, shttc = parts["Amount Due"], parts["Penalty"], parts["SHTTC Applied"]
-    if None not in (due, net, pen, shttc) and not _close(due, net + pen - shttc):
-        out.append(f"Net+Penalty-SHTTC != Amount Due")
+            out.append(f"shares+discount+penalty = {want:,.2f} but Net Tax is {net:,.2f}")
+    due = parts["Amount Due"]
+    # Amount Due always equals Net Tax on this bill (same total printed
+    # twice), independent of Penalty/SHTTC.
+    if due is not None and net is not None and not _close(due, net):
+        out.append(f"Net Tax = {net:,.2f} but Amount Due is {due:,.2f}")
     return out
 
 
