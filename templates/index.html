@@ -130,30 +130,60 @@ fetch('/samples').then(r => r.json()).then(list => {
   });
 });
 
+let pollTimer = null;
+
+async function readJson(res) {
+  const ct = res.headers.get('content-type') || '';
+  if (ct.includes('application/json')) return res.json();
+  const txt = (await res.text()).slice(0, 300);
+  const e = new Error(
+    (res.status === 502 || res.status === 504 || /gateway|timeout/i.test(txt))
+      ? ('The server took too long and the connection dropped (HTTP ' + res.status + ').')
+      : ('The server returned HTTP ' + res.status + ' instead of a result.'));
+  e.nonJson = true;
+  throw e;
+}
+
+function pollJob(jobId, startedAt) {
+  clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    try {
+      const j = await readJson(await fetch('/jobs/' + jobId, { cache: 'no-store' }));
+      if (j.status === 'running') {
+        const secs = Math.round((Date.now() - startedAt) / 1000);
+        statusEl.innerHTML = '<span class="spin"></span> Running OCR&hellip; ' + secs + 's elapsed'
+          + (j.files > 1 ? (' &middot; ' + j.files + ' files') : '')
+          + '. Big scans take a few minutes &mdash; you can leave this tab open.';
+        return;
+      }
+      clearInterval(pollTimer);
+      document.getElementById('go').disabled = false;
+      if (j.status === 'done') { render(j); statusEl.textContent = ''; }
+      else { statusEl.innerHTML = '<span class="err">' + (j.error || 'Extraction failed.') + '</span>'; }
+    } catch (err) {
+      statusEl.innerHTML = '<span class="spin"></span> Working&hellip; (waiting for the server)';
+    }
+  }, 2500);
+}
+
 f.addEventListener('submit', async (e) => {
   e.preventDefault();
   const btn = document.getElementById('go');
   btn.disabled = true;
-  statusEl.innerHTML = '<span class="spin"></span> Reading PDFs and running OCR&hellip; roughly 2–5 seconds per page, so a 30-page file takes a couple of minutes. The very first run also downloads the OCR model (~15 MB).';
+  clearInterval(pollTimer);
+  statusEl.innerHTML = '<span class="spin"></span> Fetching the PDF(s)&hellip;';
   out.style.display = 'none';
   try {
-    const res = await fetch('/extract', { method:'POST', body:new FormData(f) });
-    const ct = res.headers.get('content-type') || '';
-    if (!ct.includes('application/json')) {
-      const txt = (await res.text()).slice(0, 200);
-      let msg = `The server returned ${res.status} instead of a result.`;
-      if (res.status === 502 || res.status === 504 || /gateway/i.test(txt))
-        msg += ' It likely timed out on a large OCR job — try a smaller folder / a single PDF, or ask IT to raise the IIS reverse-proxy timeout.';
-      statusEl.innerHTML = '<span class="err">' + msg + '</span>';
+    const res = await fetch('/extract', { method: 'POST', body: new FormData(f) });
+    const data = await readJson(res);
+    if (!res.ok && !data.job_id) {
+      statusEl.innerHTML = '<span class="err">' + (data.error || 'Something went wrong.') + '</span>';
+      btn.disabled = false;
       return;
     }
-    const data = await res.json();
-    if (!res.ok) { statusEl.innerHTML = '<span class="err">' + (data.error||'Something went wrong.') + '</span>'; return; }
-    render(data);
-    statusEl.textContent = '';
+    pollJob(data.job_id, Date.now());
   } catch (err) {
-    statusEl.innerHTML = '<span class="err">Request failed: ' + err + '</span>';
-  } finally {
+    statusEl.innerHTML = '<span class="err">' + (err.nonJson ? err.message : ('Request failed: ' + err)) + '</span>';
     btn.disabled = false;
   }
 });

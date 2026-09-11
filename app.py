@@ -11,6 +11,7 @@ import logging
 import os
 import pathlib
 import socket
+import threading
 import time
 import traceback
 import uuid
@@ -130,9 +131,89 @@ def sample_file(name: str):
     return send_file(p, mimetype="application/pdf")
 
 
+# job_id -> {"status": running|done|error, "result"|"error", "ts", "started", "label"}
+_JOBS: dict[str, dict] = {}
+_JOB_TTL = 3600
+
+
+def _gc_jobs() -> None:
+    now = time.time()
+    for k in [k for k, v in _JOBS.items()
+              if now - v.get("ts", now) > _JOB_TTL and v["status"] != "running"]:
+        _JOBS.pop(k, None)
+
+
+def _run_extraction(job_id: str, location: str, sources: list[tuple[str, bytes]],
+                    link: str) -> None:
+    """Heavy work (OCR -> parse -> review -> xlsx -> DB), off the request thread."""
+    try:
+        parser = get_parser(location)
+        all_rows: list[dict] = []
+        notes: list[str] = []
+        t0 = time.time()
+        for name, data in sources:
+            doc = ocr.build_document(name, data, mode=parser.ocr_mode,
+                                     dpi=parser.dpi, psm=parser.psm)
+            rows = parser.parse_document(doc)
+            for r in rows:
+                r.setdefault("Source file", name)
+            all_rows.extend(rows)
+            notes.extend(f"{name}: {w}" for w in doc.warnings)
+            if not doc.used_ocr:
+                notes.append(f"{name}: used the PDF text layer (no OCR needed).")
+        took = time.time() - t0
+
+        result = review(location, parser.keys(), all_rows)
+        all_rows = result.rows
+        for r, iss in zip(all_rows, result.issues_by_row):
+            r["Review"] = "; ".join(iss)
+        notes = result.summary + notes
+
+        extra = ["Review"] + (["Source file"] if len(sources) > 1 else [])
+        columns = parser.columns + extra
+        column_keys = parser.keys() + extra
+
+        if location in ("Mandaluyong City", "Pampanga"):
+            notes.insert(0, "No column layout is defined for this location yet — "
+                            "showing raw OCR lines. Send a sample PDF + field "
+                            "list to get a proper extractor.")
+        notes.append("OCR-read from scanned PDFs — verify every figure against "
+                     "the source before use.")
+
+        xlsx = build_workbook(location, columns, column_keys, all_rows, notes,
+                              [n for n, _ in sources], flagged=result.rows_flagged)
+        fname = f"RPT_{location.replace(' ', '_')}_{time.strftime('%Y%m%d_%H%M')}.xlsx"
+        token = uuid.uuid4().hex
+        _RESULTS[token] = {"bytes": xlsx, "name": fname, "ts": time.time()}
+
+        src_label = link if link else "upload: " + ", ".join(n for n, _ in sources)
+        run_id = db.record_run(
+            location=location, source=src_label, files=[n for n, _ in sources],
+            row_count=len(all_rows), rows_flagged=result.rows_flagged,
+            seconds=round(took, 1), columns=columns, rows=all_rows, notes=notes,
+            xlsx=xlsx, xlsx_name=fname,
+        )
+
+        _JOBS[job_id] = {
+            "status": "done", "ts": time.time(),
+            "result": dict(
+                location=location, columns=columns, column_keys=column_keys,
+                rows=all_rows[:1000], row_count=len(all_rows),
+                rows_flagged=result.rows_flagged, seconds=round(took, 1),
+                notes=notes, files=[n for n, _ in sources],
+                download=f"/download/{token}", run_id=run_id,
+                saved=run_id is not None,
+            ),
+        }
+    except Exception as e:  # noqa: BLE001
+        traceback.print_exc()
+        _JOBS[job_id] = {"status": "error", "ts": time.time(), "error": str(e)}
+
+
 @app.post("/extract")
 def extract():
     _gc_results()
+    _gc_jobs()
     location = (request.form.get("location") or "").strip()
     link = (request.form.get("link") or "").strip()
     if location not in LOCATIONS:
@@ -156,75 +237,29 @@ def extract():
     except Exception as e:  # pragma: no cover
         return jsonify(error=f"Could not read the input: {e}"), 400
 
-    parser = get_parser(location)
-    all_rows: list[dict] = []
-    notes: list[str] = []
-    t0 = time.time()
-    try:
-        for name, data in sources:
-            doc = ocr.build_document(name, data, mode=parser.ocr_mode,
-                                     dpi=parser.dpi, psm=parser.psm)
-            rows = parser.parse_document(doc)
-            for r in rows:
-                r.setdefault("Source file", name)
-            all_rows.extend(rows)
-            notes.extend(f"{name}: {w}" for w in doc.warnings)
-            if not doc.used_ocr:
-                notes.append(f"{name}: used the PDF text layer (no OCR needed).")
-    except RuntimeError as e:
-        return jsonify(error=str(e)), 500
-    except Exception as e:  # pragma: no cover
-        traceback.print_exc()
-        return jsonify(error=f"Extraction failed: {e}"), 500
+    job_id = uuid.uuid4().hex
+    label = link if link else ", ".join(n for n, _ in sources)
+    _JOBS[job_id] = {"status": "running", "ts": time.time(),
+                     "started": time.time(), "label": label,
+                     "file_count": len(sources)}
+    threading.Thread(target=_run_extraction, daemon=True,
+                     args=(job_id, location, sources, link)).start()
+    return jsonify(job_id=job_id, status="running", files=len(sources)), 202
 
-    took = time.time() - t0
 
-    # --- reviewer pass (repair + flag) BEFORE producing any output ----------
-    result = review(location, parser.keys(), all_rows)
-    all_rows = result.rows
-    for r, iss in zip(all_rows, result.issues_by_row):
-        r["Review"] = "; ".join(iss)
-    notes = result.summary + notes
-
-    extra = ["Review"] + (["Source file"] if len(sources) > 1 else [])
-    columns = parser.columns + extra        # display headers
-    column_keys = parser.keys() + extra     # row-dict keys (== columns unless dup'd)
-
-    if location in ("Mandaluyong City", "Pampanga"):
-        notes.insert(0, "No column layout is defined for this location yet — "
-                        "showing raw OCR lines. Send a sample PDF + field list "
-                        "to get a proper extractor.")
-    notes.append("OCR-read from scanned PDFs — verify every figure against the "
-                 "source before use.")
-
-    xlsx = build_workbook(location, columns, column_keys, all_rows, notes,
-                          [n for n, _ in sources], flagged=result.rows_flagged)
-    fname = f"RPT_{location.replace(' ', '_')}_{time.strftime('%Y%m%d_%H%M')}.xlsx"
-    token = uuid.uuid4().hex
-    _RESULTS[token] = {"bytes": xlsx, "name": fname, "ts": time.time()}
-
-    src_label = link.strip() if link else "upload: " + ", ".join(n for n, _ in sources)
-    run_id = db.record_run(
-        location=location, source=src_label, files=[n for n, _ in sources],
-        row_count=len(all_rows), rows_flagged=result.rows_flagged,
-        seconds=round(took, 1), columns=columns, rows=all_rows, notes=notes,
-        xlsx=xlsx, xlsx_name=fname,
-    )
-
-    return jsonify(
-        location=location,
-        columns=columns,
-        column_keys=column_keys,
-        rows=all_rows[:1000],
-        row_count=len(all_rows),
-        rows_flagged=result.rows_flagged,
-        seconds=round(took, 1),
-        notes=notes,
-        files=[n for n, _ in sources],
-        download=f"/download/{token}",
-        run_id=run_id,
-        saved=run_id is not None,
-    )
+@app.get("/jobs/<job_id>")
+def job_status(job_id: str):
+    j = _JOBS.get(job_id)
+    if not j:
+        return jsonify(status="unknown",
+                       error="No such job (it may have expired)."), 404
+    if j["status"] == "running":
+        return jsonify(status="running",
+                       elapsed=round(time.time() - j["started"], 1),
+                       label=j.get("label", ""), files=j.get("file_count", 0))
+    if j["status"] == "error":
+        return jsonify(status="error", error=j["error"]), 200
+    return jsonify(status="done", **j["result"])
 
 
 @app.get("/runs")
