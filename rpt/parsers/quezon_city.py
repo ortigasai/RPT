@@ -24,35 +24,52 @@ PIN_RE = re.compile(r"\b1[13][-/]\d{3}[-/]\d{3}[-/]\d{3}[-/]\d[-/]\d{3}[-/]\d{3}
 MONEY = re.compile(r"[({]?-?\d{1,3}(?:,\d{3})*\.\d{2}[)}]?|[({]?-?\d+\.\d{2}[)}]?")
 PCT = re.compile(r"^[({]?-?\d{1,3}\s*%[)}]?$")
 
-# OCR variants of the right-column labels seen on the samples
+# OCR variants of the right-column labels seen on the samples. "SHA[RF]E"
+# tolerates the same R<->F confusion Barangay's pattern already allows for
+# (seen e.g. as "CITYSHAFE").
 LBL = {
-    "City Share": r"C[1I]TY\s*[- ]?\s*SHARE",
-    "Barangay Share": r"BA[RF]ANGAY\s*SHARE",
+    "City Share": r"C[1I]TY\s*[- ]?\s*SHA[RF]E",
+    "Barangay Share": r"BA[RF]ANGAY\s*SHA[RF]E",
     "Special Education Fund": r"SPEC[1I]AL\s*EDUC\w*",
     "Garbage Fee": r"GA[RF]BAGE\s*FEE",
     "Discount": r"D[1I]SCOUNT",
     "Penalty": r"PENA[LI][ JT]?Y|PENAL",
-    "SHTTC Applied": r"SH\w?T+C\s*APPL[1I]ED|SHTTC",
+    "SHTTC Applied": r"SH\w?T+C\s*AP[PF]L[1I]ED|SHTTC",
     "Net Tax": r"NET\s*TAX",
     "Amount Due": r"A\w?M\w?O\w?[UJ]NT\s*DUE",
     "Total": r"TOTAL\s*=",
 }
 
+# SHTTC Applied's value is almost always glued directly onto its own label
+# with no separating whitespace (e.g. "APPLIEDO.OO", "APPLIED(O.OO"), so the
+# normal word-boundary money search never isolates a standalone token for it.
+# Pull it straight out of the line text instead. Tolerates the same P<->F
+# OCR confusion seen on "APFLIED", and D<->Q on "APPLIEQ".
+SHTTC_VAL_RE = re.compile(
+    r"AP[PF]L[1I]E[DQ]\s*\(?\s*([0-9OoDdQq]{1,3}(?:,[0-9OoDdQq]{3})*\.[0-9OoDdQq]{2})", re.I)
 
-_OD_ZERO = re.compile(r"\(?-?[0-9OoDd]{1,3}(?:,[0-9OoDd]{3})*\.[0-9OoDd]{2}\)?")
+
+_OD_ZERO = re.compile(r"\(?-?[0-9OoDdQq]{1,3}(?:,[0-9OoDdQq]{3})*\.[0-9OoDdQq]{2}\)?")
 
 
 def _norm_money(tok: str) -> str:
     tok = tok.replace("{", "(").replace("}", ")").replace(":", ".").replace(" ", "")
-    # OCR often reads a '0' as 'O' or 'D' inside an otherwise money-shaped
-    # token (e.g. "D.00", "{0.0D}") — safe to fix only once the token already
-    # looks like a money value (has the right shape around a literal dot).
+    # OCR often reads a '0' as 'O', 'D' or 'Q' inside an otherwise
+    # money-shaped token (e.g. "D.00", "{0.0D}", "O.OQ") — safe to fix only
+    # once the token already looks like a money value (has the right shape
+    # around a literal dot).
     if _OD_ZERO.fullmatch(tok):
-        tok = re.sub(r"[OoDd]", "0", tok)
+        tok = re.sub(r"[OoDdQq]", "0", tok)
     # "1.589.79" (dot as thousands sep) -> "1589.79"
     m = re.fullmatch(r"(\(?)(-?)(\d{1,3})\.(\d{3})\.(\d{2})(\)?)", tok)
     if m:
         return f"{m.group(1)}{m.group(2)}{m.group(3)}{m.group(4)}.{m.group(5)}{m.group(6)}"
+    # "1,78228" (decimal point dropped before the cents) -> "1,782.28".
+    # Requires an actual thousands comma so this can't misfire on an
+    # unrelated 3-5 digit token (a page/reference number, say).
+    m = re.fullmatch(r"(\(?-?\d{1,3}(?:,\d{3})+)(\d{2})(\)?)", tok)
+    if m:
+        return f"{m.group(1)}.{m.group(2)}{m.group(3)}"
     return tok
 
 
@@ -90,7 +107,7 @@ class QuezonCityParser(Parser):
             garbage = _val(page, LBL["Garbage Fee"])
             discount = _neg(_val(page, LBL["Discount"]))
             penalty = _val(page, LBL["Penalty"])
-            shttc = _val(page, LBL["SHTTC Applied"])
+            shttc = _shttc(page)
             net = _val(page, LBL["Net Tax"])
             due = _val(page, LBL["Amount Due"]) or _val(page, LBL["Total"])
 
@@ -173,6 +190,16 @@ def _val(page: Page, label_rx: str) -> float | None:
                 best = (dy, tok2)
         if best:
             return to_num(best[1])
+    return None
+
+
+def _shttc(page: Page) -> float | None:
+    for ln in page.lines:
+        if not re.search(LBL["SHTTC Applied"], ln.text, re.I):
+            continue
+        m = SHTTC_VAL_RE.search(ln.text)
+        if m:
+            return to_num(_norm_money(m.group(1)))
     return None
 
 
