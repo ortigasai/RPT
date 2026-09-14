@@ -54,6 +54,21 @@ def configured() -> bool:
         return True  # present but broken — surface the error later
 
 
+def _sharepoint_lib_path(url: str) -> str | None:
+    """A SharePoint folder/file URL copied straight from the browser address
+    bar (rather than via the "Copy link" share flyout) carries the
+    site-relative path in an `id=` query param, e.g.
+        .../Forms/AllItems.aspx?id=%2Fsites%2FPermitsandRegistrations%2F
+        Shared%20Documents%2FRPT%20Assessment%2F2026%2F...&viewid=...
+    Everything after the "Shared Documents" library name matches the
+    broker's own path convention, so strip up to there and use the rest."""
+    raw = parse_qs(urlparse(url).query).get("id", [None])[0]
+    if not raw:
+        return None
+    m = re.search(r"/Shared Documents/(.*)$", unquote(raw), re.I)
+    return "/" + m.group(1) if m else None
+
+
 def is_broker_ref(link: str) -> bool:
     s = (link or "").strip()
     if not s:
@@ -68,7 +83,10 @@ def is_broker_ref(link: str) -> bool:
             cfg_host = urlparse(c["endpoint"]).netloc.lower() if c else ""
         except BrokerError:
             pass
-        return host == cfg_host or "paba.ortigasland" in host
+        if host == cfg_host or "paba.ortigasland" in host:
+            return True
+        # a SharePoint folder/file URL pasted straight from the address bar
+        return "sharepoint.com" in host and _sharepoint_lib_path(s) is not None
     # no scheme, no host -> treat a plain path as a broker path when configured
     return configured() and (s.startswith("/") or "/" in s)
 
@@ -81,6 +99,9 @@ def _normalise_path(link: str, cfg: dict) -> str:
         q = parse_qs(urlparse(s).query)
         if "path" in q:
             return unquote(q["path"][0])
+        sp_path = _sharepoint_lib_path(s)
+        if sp_path:
+            return sp_path
         m = re.search(r"/scopes/[^/]+/(?:items|content|metadata)/?(.*)$", urlparse(s).path)
         s = unquote(m.group(1)) if m else "/"
     if not s.startswith("/"):
